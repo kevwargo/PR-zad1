@@ -1,6 +1,3 @@
-#define _GNU_SOURCE
-#define _POSIX_C_SOURCE 200809L
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -19,6 +16,19 @@ double gettime(void)
     return ((double)ts.tv_sec + 1e-9 * (double)ts.tv_nsec);
 }
 
+pid_t GetCurrentThread()
+{
+    return syscall(SYS_gettid);
+}
+
+void SetThreadAffinityMask(pid_t tid, int cpu)
+{
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(cpu, &mask);
+    sched_setaffinity(tid, sizeof(cpu_set_t), &mask);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2)
@@ -35,10 +45,21 @@ int main(int argc, char **argv)
     int opt = atoi(argv[1]);
     switch (opt)
     {
+        case 0:
+            start = gettime();
+            for (int i = 0; i < num_steps; i++)
+            {
+                double x = (i + 0.5)*step;
+                sum += 4.0 / (1. + x*x);
+            }
+            pi = sum * step;
+            total = gettime() - start;
+            break;
+            
         case 1:
             /* omp_set_num_threads(4); */
             start = gettime();
-#pragma omp parallel for reduction (+:sum)
+#pragma omp parallel for
             for (int i = 0; i < num_steps; i++)
             {
                 double x = (i + 0.5)*step;
@@ -49,31 +70,35 @@ int main(int argc, char **argv)
             break;
 
         case 2:
-            threads_num = 4;
-            omp_set_num_threads(threads_num);
-            pi_tab = malloc(threads_num * sizeof(double));
-            for (int i = 0; i < threads_num; i++)
-                pi_tab[i] = 0;
             start = gettime();
-#pragma omp parallel
+#pragma omp parallel for
+            for (int i = 0; i < num_steps; i++)
             {
-                int ind = omp_get_thread_num();
-#pragma omp for
-                for (int i = 0; i < num_steps; i++)
-                {
-
-                    double x = (i + .5) * step;
-                    pi_tab[ind] += 4.0 / (1. + x*x);
-                }
+                double x = (i + .5) * step;
+#pragma omp atomic
+                sum += 4.0 / (1. + x*x);
             }
-            for (int i = 0; i < threads_num; i++)
-                sum += pi_tab[i];
             pi = sum * step;
             total = gettime() - start;
-            free(pi_tab);
             break;
 
         case 3:
+            start = gettime();
+#pragma omp parallel  reduction (+:sum)
+            {
+                SetThreadAffinityMask(GetCurrentThread(), omp_get_thread_num() & 1);
+#pragma omp for
+                for (int i = 0; i < num_steps; i++)
+                {
+                    double x = (i + 0.5)*step;
+                    sum += 4.0 / (1. + x*x);
+                }
+            }
+            pi = sum*step;
+            total = gettime() - start;
+            break;
+
+        case 4:
             threads_num = 2;
             omp_set_num_threads(threads_num);
             n = 20;
@@ -86,11 +111,7 @@ int main(int argc, char **argv)
 #pragma omp parallel 
                 {
                     int ind = omp_get_thread_num();
-                    /* SetThreadAffinityMask(GetCurrentThread(), 1 << omp_get_thread_num()+1); */
-                    cpu_set_t mask;
-                    CPU_ZERO(&mask);
-                    CPU_SET(ind & 1, &mask);
-                    sched_setaffinity(syscall(SYS_gettid), sizeof(cpu_set_t), &mask);
+                    SetThreadAffinityMask(GetCurrentThread(), ind & 1);
 #pragma omp for
                     for (int i = 0; i < num_steps; i++)
                     {
@@ -108,28 +129,11 @@ int main(int argc, char **argv)
             free(pi_tab);
             break;
 
-        case 4:
-            omp_set_num_threads(4);
-            start = gettime();
-#pragma omp parallel  reduction (+:sum)
-            {
-                /* SetThreadAffinityMask(GetCurrentThread(), 1 << omp_get_thread_num()); */
-#pragma omp for
-                for (int i = 0; i < num_steps; i++)
-                {
-                    double x = (i + 0.5)*step;
-                    sum += 4.0 / (1. + x*x);
-                }
-            }
-            pi = sum*step;
-            total = gettime() - start;
-            break;
-
         case 5:
             start = gettime();
 #pragma omp parallel  reduction (+:sum)
             {
-                /* SetThreadAffinityMask(GetCurrentThread(), 1 << (omp_get_thread_num()%2 +1)); */
+                SetThreadAffinityMask(GetCurrentThread(), (omp_get_thread_num()%2 +1));
 #pragma omp for
                 for (int i = 0; i < num_steps; i++)
                 {
